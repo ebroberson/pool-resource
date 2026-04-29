@@ -323,4 +323,124 @@ var _ = Describe("In", func() {
 			})
 		})
 	})
+
+	Context("when HEAD commit is about a different pool", func() {
+		var sha string
+
+		BeforeEach(func() {
+			initRepo := exec.Command("bash", "-e", "-c", `
+				git init --bare
+			`)
+			initRepo.Dir = gitRepo
+			session, err := gexec.Start(initRepo, GinkgoWriter, GinkgoWriter)
+			Ω(err).ShouldNot(HaveOccurred())
+			<-session.Exited
+			Ω(session.ExitCode()).Should(BeZero())
+
+			cloneRepo := exec.Command("bash", "-e", "-c", `
+				TEMP_REPO_DIR=$(mktemp -d)
+				git clone `+gitRepo+` $TEMP_REPO_DIR
+				cd $TEMP_REPO_DIR
+
+				git config user.email "ginkgo@localhost"
+				git config user.name "Ginkgo Local"
+
+				mkdir -p lock-pool/claimed lock-pool/unclaimed
+				mkdir -p other-pool/claimed other-pool/unclaimed
+
+				echo '{"some":"json"}' > lock-pool/unclaimed/some-lock
+				echo '{"other":"data"}' > other-pool/unclaimed/other-lock
+
+				git add .
+				git commit -m 'setup pools'
+
+				# Move lock in our target pool
+				git mv lock-pool/unclaimed/some-lock lock-pool/claimed/some-lock
+				git commit -m 'claiming some-lock in target pool'
+
+				# Make a more recent commit in a different pool (this becomes HEAD)
+				git mv other-pool/unclaimed/other-lock other-pool/claimed/other-lock
+				git commit -m 'claiming other-lock in different pool'
+
+				git push origin HEAD:master
+
+				# Output the SHA and cleanup
+				git log --grep="claiming some-lock" --format="%H"
+				rm -rf $TEMP_REPO_DIR
+			`)
+			session, err = gexec.Start(cloneRepo, GinkgoWriter, GinkgoWriter)
+			Ω(err).ShouldNot(HaveOccurred())
+			<-session.Exited
+			Ω(session.ExitCode()).Should(BeZero())
+
+			// Extract the SHA from the output - it should be the last line before cleanup
+			output := string(session.Out.Contents())
+			lines := strings.Split(strings.TrimSpace(output), "\n")
+
+			// Find the SHA line (should be a 40-character hex string)
+			for _, line := range lines {
+				line = strings.TrimSpace(line)
+				// Check if it's a valid 40-character hex SHA
+				if len(line) == 40 {
+					// Check if all characters are hexadecimal
+					isHex := true
+					for _, char := range line {
+						if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
+							isHex = false
+							break
+						}
+					}
+					if isHex {
+						sha = line
+						break
+					}
+				}
+			}
+		})
+
+		It("finds the correct lock file for the target pool despite HEAD being about different pool", func() {
+			jsonIn := fmt.Sprintf(`
+				{
+					"source": {
+						"uri": "%s",
+						"branch": "master",
+						"pool": "lock-pool"
+					},
+					"version": {"ref": "%s"}
+				}
+			`, gitRepo, sha)
+
+			session := runIn(jsonIn, inDestination, 0)
+
+			err := json.Unmarshal(session.Out.Contents(), &output)
+			Ω(err).ShouldNot(HaveOccurred())
+
+			// Verify the name file contains the correct lock name
+			lockNameFile := filepath.Join(inDestination, "name")
+			Ω(lockNameFile).Should(BeARegularFile())
+
+			fileContents, err := os.ReadFile(lockNameFile)
+			Ω(err).ShouldNot(HaveOccurred())
+			Ω(strings.TrimSpace(string(fileContents))).Should(Equal("some-lock"))
+
+			// Verify metadata file is created with correct content
+			metaDataFile := filepath.Join(inDestination, "metadata")
+			Ω(metaDataFile).Should(BeARegularFile())
+
+			fileContents, err = os.ReadFile(metaDataFile)
+			Ω(err).ShouldNot(HaveOccurred())
+			Ω(fileContents).Should(MatchJSON(`{"some":"json"}`))
+
+			// Verify the response structure
+			Ω(output).Should(Equal(inResponse{
+				Version: version{
+					Ref: sha,
+				},
+				Metadata: []metadataPair{
+					{Name: "lock_name", Value: "some-lock"},
+					{Name: "pool_name", Value: "lock-pool"},
+				},
+			}))
+		})
+	})
 })

@@ -100,7 +100,7 @@ func runOut(request out.OutRequest, sourceDir string) *gexec.Session {
 
 func setupGitRepo(dir string) {
 	gitSetup := exec.Command("bash", "-e", "-c", `
-	  git init
+	  git init -b master
 
 		git config user.email "ginkgo@localhost"
 		git config user.name "Ginkgo Local"

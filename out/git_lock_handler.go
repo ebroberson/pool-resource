@@ -214,6 +214,28 @@ func (glh *GitLockHandler) CheckLock(lockName string) (string, error) {
 	return string(ref), nil
 }
 
+func (glh *GitLockHandler) CheckUnclaimedLock(lockName string) (string, error) {
+	glh.checkOnly = true
+
+	// Wait if unclaimed
+	_, err := os.ReadFile(filepath.Join(glh.dir, glh.Source.Pool, "unclaimed", lockName))
+	if err == nil {
+		return "", ErrLockActive
+	}
+
+	_, err = glh.git("pull", "origin", glh.Source.Branch)
+	if err != nil {
+		return "", err
+	}
+
+	ref, err := glh.git("rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+
+	return string(ref), nil
+}
+
 func (glh *GitLockHandler) Setup() error {
 	var err error
 
@@ -329,8 +351,12 @@ func (glh *GitLockHandler) messagePrefix() string {
 	jobName := os.Getenv("BUILD_JOB_NAME")
 	pipelineName := os.Getenv("BUILD_PIPELINE_NAME")
 	teamName := os.Getenv("BUILD_TEAM_NAME")
+	instanceVars := os.Getenv("BUILD_PIPELINE_INSTANCE_VARS")
 
 	if buildName != "" && jobName != "" && pipelineName != "" && teamName != "" {
+		if instanceVars != "" {
+			return fmt.Sprintf("%s/%s/%s/%s build %s ", teamName, pipelineName, instanceVars, jobName, buildName)
+		}
 		return fmt.Sprintf("%s/%s/%s build %s ", teamName, pipelineName, jobName, buildName)
 	} else if buildID != "" {
 		return fmt.Sprintf("one-off build %s ", buildID)

@@ -325,77 +325,43 @@ var _ = Describe("In", func() {
 	})
 
 	Context("when HEAD commit is about a different pool", func() {
-		var sha string
+		var headCommitSHA string
 
 		BeforeEach(func() {
-			initRepo := exec.Command("bash", "-e", "-c", `
-				git init --bare
-			`)
-			initRepo.Dir = gitRepo
-			session, err := gexec.Start(initRepo, GinkgoWriter, GinkgoWriter)
-			Ω(err).ShouldNot(HaveOccurred())
-			<-session.Exited
-			Ω(session.ExitCode()).Should(BeZero())
-
-			cloneRepo := exec.Command("bash", "-e", "-c", `
-				TEMP_REPO_DIR=$(mktemp -d)
-				git clone `+gitRepo+` $TEMP_REPO_DIR
-				cd $TEMP_REPO_DIR
-
-				git config user.email "ginkgo@localhost"
-				git config user.name "Ginkgo Local"
-
-				mkdir -p lock-pool/claimed lock-pool/unclaimed
+			setupGitRepo(gitRepo)
+			
+			// Create a second pool and make changes to both pools
+			setupMultiPoolRepo := exec.Command("bash", "-e", "-c", `
+				# Create second pool structure
 				mkdir -p other-pool/claimed other-pool/unclaimed
-
-				echo '{"some":"json"}' > lock-pool/unclaimed/some-lock
 				echo '{"other":"data"}' > other-pool/unclaimed/other-lock
-
-				git add .
-				git commit -m 'setup pools'
-
-				# Move lock in our target pool
+				git add other-pool/
+				git commit -m 'setup other pool'
+				
+				# Move lock in our target pool (this is the commit we want to test)
 				git mv lock-pool/unclaimed/some-lock lock-pool/claimed/some-lock
 				git commit -m 'claiming some-lock in target pool'
-
-				# Make a more recent commit in a different pool (this becomes HEAD)
+				
+				# Make a more recent commit in different pool (becomes HEAD)
 				git mv other-pool/unclaimed/other-lock other-pool/claimed/other-lock
 				git commit -m 'claiming other-lock in different pool'
-
-				git push origin HEAD:master
-
-				# Output the SHA and cleanup
-				git log --grep="claiming some-lock" --format="%H"
-				rm -rf $TEMP_REPO_DIR
+				
+				# Output the SHA of the HEAD commit (the one about different pool)
+				git rev-parse HEAD
 			`)
-			session, err = gexec.Start(cloneRepo, GinkgoWriter, GinkgoWriter)
+			setupMultiPoolRepo.Dir = gitRepo
+			setupMultiPoolRepo.Stderr = GinkgoWriter
+			setupMultiPoolRepo.Stdout = GinkgoWriter
+			
+			session, err := gexec.Start(setupMultiPoolRepo, GinkgoWriter, GinkgoWriter)
 			Ω(err).ShouldNot(HaveOccurred())
 			<-session.Exited
 			Ω(session.ExitCode()).Should(BeZero())
-
-			// Extract the SHA from the output - it should be the last line before cleanup
-			output := string(session.Out.Contents())
-			lines := strings.Split(strings.TrimSpace(output), "\n")
-
-			// Find the SHA line (should be a 40-character hex string)
-			for _, line := range lines {
-				line = strings.TrimSpace(line)
-				// Check if it's a valid 40-character hex SHA
-				if len(line) == 40 {
-					// Check if all characters are hexadecimal
-					isHex := true
-					for _, char := range line {
-						if !((char >= '0' && char <= '9') || (char >= 'a' && char <= 'f') || (char >= 'A' && char <= 'F')) {
-							isHex = false
-							break
-						}
-					}
-					if isHex {
-						sha = line
-						break
-					}
-				}
-			}
+			
+			// Extract SHA from output (last line)
+			output := strings.TrimSpace(string(session.Out.Contents()))
+			lines := strings.Split(output, "\n")
+			headCommitSHA = strings.TrimSpace(lines[len(lines)-1])
 		})
 
 		It("finds the correct lock file for the target pool despite HEAD being about different pool", func() {
@@ -408,7 +374,7 @@ var _ = Describe("In", func() {
 					},
 					"version": {"ref": "%s"}
 				}
-			`, gitRepo, sha)
+			`, gitRepo, headCommitSHA)
 
 			session := runIn(jsonIn, inDestination, 0)
 
@@ -434,7 +400,7 @@ var _ = Describe("In", func() {
 			// Verify the response structure
 			Ω(output).Should(Equal(inResponse{
 				Version: version{
-					Ref: sha,
+					Ref: headCommitSHA,
 				},
 				Metadata: []metadataPair{
 					{Name: "lock_name", Value: "some-lock"},
